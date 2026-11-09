@@ -369,6 +369,117 @@ class StorageUtils {
       await file.writeAsString(jsonEncode(data));
     } catch (_) {}
   }
+
+  static Future<String> exportBackup() async {
+    final favorites = await loadFavoritesWithTimestamp();
+    final watchHistory = await loadWatchHistory();
+
+    Map<String, dynamic> watchedEpisodes = {};
+    try {
+      final epFile = await _localWatchedEpisodesFile;
+      if (await epFile.exists()) {
+        watchedEpisodes = jsonDecode(await epFile.readAsString());
+      }
+    } catch (_) {}
+
+    final backupData = {
+      'version': 1,
+      'app': 'ccloud_plus',
+      'exportedAt': DateTime.now().toIso8601String(),
+      'favorites': favorites.map((f) => f.toJson()).toList(),
+      'watch_history': watchHistory.map((w) => w.toJson()).toList(),
+      'watched_episodes': watchedEpisodes,
+    };
+
+    return const JsonEncoder.withIndent('  ').convert(backupData);
+  }
+
+  static Future<Map<String, int>> importBackup(String jsonString) async {
+    final dynamic decoded = jsonDecode(jsonString);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('ساختار فایل پشتیبان نامعتبر است.');
+    }
+
+    int restoredFavorites = 0;
+    int restoredHistory = 0;
+
+    // Restore favorites
+    if (decoded.containsKey('favorites') && decoded['favorites'] is List) {
+      final list = decoded['favorites'] as List;
+      final existingFavorites = await loadFavoritesWithTimestamp();
+      for (final item in list) {
+        try {
+          final fav = MediaItemWithTimestamp.fromJson(
+            item as Map<String, dynamic>,
+          );
+          final idx = existingFavorites.indexWhere(
+            (e) =>
+                e.mediaItem.id == fav.mediaItem.id &&
+                e.mediaItem.type == fav.mediaItem.type,
+          );
+          if (idx != -1) {
+            existingFavorites[idx] = fav;
+          } else {
+            existingFavorites.add(fav);
+          }
+          restoredFavorites++;
+        } catch (_) {}
+      }
+      existingFavorites.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      await _saveFavoritesWithTimestamp(existingFavorites);
+    }
+
+    // Restore watch history
+    if (decoded.containsKey('watch_history') &&
+        decoded['watch_history'] is List) {
+      final list = decoded['watch_history'] as List;
+      final existingHistory = await loadWatchHistory();
+      for (final item in list) {
+        try {
+          final hist = WatchHistoryItem.fromJson(item as Map<String, dynamic>);
+          existingHistory.removeWhere((e) => e.id == hist.id);
+          existingHistory.add(hist);
+          restoredHistory++;
+        } catch (_) {}
+      }
+      existingHistory.sort(
+        (a, b) => b.lastWatchedAt.compareTo(a.lastWatchedAt),
+      );
+      final file = await _localWatchHistoryFile;
+      await file.writeAsString(
+        jsonEncode(existingHistory.take(50).map((e) => e.toJson()).toList()),
+      );
+    }
+
+    // Restore watched episodes
+    if (decoded.containsKey('watched_episodes') &&
+        decoded['watched_episodes'] is Map) {
+      try {
+        final Map<String, dynamic> incoming = decoded['watched_episodes'];
+        final epFile = await _localWatchedEpisodesFile;
+        Map<String, dynamic> existing = {};
+        if (await epFile.exists()) {
+          existing = jsonDecode(await epFile.readAsString());
+        }
+        for (final entry in incoming.entries) {
+          final existingList =
+              (existing[entry.key] as List<dynamic>?)
+                  ?.map((e) => e.toString())
+                  .toSet() ??
+              {};
+          final incomingList =
+              (entry.value as List<dynamic>?)
+                  ?.map((e) => e.toString())
+                  .toSet() ??
+              {};
+          existing[entry.key] = existingList.union(incomingList).toList();
+        }
+        await epFile.writeAsString(jsonEncode(existing));
+      } catch (_) {}
+    }
+
+    return {'favorites': restoredFavorites, 'history': restoredHistory};
+  }
 }
 
 bool containsFarsiOrArabic(String text) {

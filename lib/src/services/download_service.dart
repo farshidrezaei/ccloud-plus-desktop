@@ -39,11 +39,22 @@ class DownloadController {
 class DownloadService {
   static Future<Directory> getDownloadsDirectory() async {
     final docs = await getApplicationDocumentsDirectory();
-    final dir = Directory(p.join(docs.path, 'CinevexDownloads'));
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
+    final newDir = Directory(p.join(docs.path, 'CCloudPlusDownloads'));
+    final legacyDir = Directory(p.join(docs.path, 'CinevexDownloads'));
+
+    // Migrate from legacy folder if present
+    if (await legacyDir.exists() && !await newDir.exists()) {
+      try {
+        await legacyDir.rename(newDir.path);
+      } catch (_) {
+        return legacyDir;
+      }
     }
-    return dir;
+
+    if (!await newDir.exists()) {
+      await newDir.create(recursive: true);
+    }
+    return newDir;
   }
 
   static String sanitizeFileName(String name) {

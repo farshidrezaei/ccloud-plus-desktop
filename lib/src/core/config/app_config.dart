@@ -1,7 +1,7 @@
 abstract final class AppConfig {
   static const String appName = 'CCloud+';
   static const String appFullName = 'CCloud Plus';
-  static const String currentVersion = 'v2.1.3';
+  static const String currentVersion = 'v2.2.0';
   static const String upstreamRepo = 'code3-dev/CCloud-GUI';
   static const String upstreamUrl = 'https://github.com/code3-dev/CCloud-GUI';
   static const String githubRepo = 'farshidrezaei/ccloud-plus-desktop';

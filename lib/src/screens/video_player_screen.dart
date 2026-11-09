@@ -79,6 +79,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   int _seekRippleDelta = 0;
   Timer? _seekRippleTimer;
 
+  // Sleep Timer & Desktop HUD
+  Timer? _sleepTimer;
+  int? _sleepTimerRemainingMinutes;
+  Timer? _sleepTicker;
+  bool _sleepAtEpisodeEnd = false;
+  String? _hudToastMessage;
+  IconData? _hudToastIcon;
+  Timer? _hudToastTimer;
+
   @override
   void initState() {
     super.initState();
@@ -191,6 +200,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     _completedSub = _player.stream.completed.listen((completed) {
       if (mounted && !_isDisposed && completed) {
+        if (_sleepAtEpisodeEnd) {
+          _player.pause();
+          setState(() {
+            _sleepAtEpisodeEnd = false;
+            _showControls = true;
+          });
+          _showHud('تایمر خواب: پایان قسمت و توقف پخش', Icons.bedtime_rounded);
+          return;
+        }
+
         if (widget.nextEpisodeUrl != null && !_isAutoNextDismissed) {
           _playNextEpisode();
         } else {
@@ -403,6 +422,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _countdownTimer?.cancel();
     _seekRippleTimer?.cancel();
     _progressSaveTimer?.cancel();
+    _sleepTimer?.cancel();
+    _sleepTicker?.cancel();
+    _hudToastTimer?.cancel();
     _saveCurrentWatchProgress();
     _hideTimer?.cancel();
     _loadTimeoutTimer?.cancel();
@@ -578,9 +600,332 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         _exitPlayer();
       }
       return KeyEventResult.handled;
+    } else if (event.logicalKey == LogicalKeyboardKey.bracketLeft) {
+      _stepPlaybackRate(-0.25);
+      return KeyEventResult.handled;
+    } else if (event.logicalKey == LogicalKeyboardKey.bracketRight) {
+      _stepPlaybackRate(0.25);
+      return KeyEventResult.handled;
+    } else if (event.logicalKey == LogicalKeyboardKey.keyC) {
+      _toggleSubtitleVisibility();
+      return KeyEventResult.handled;
+    } else if (event.logicalKey == LogicalKeyboardKey.keyZ) {
+      _adjustSubtitleDelay(-0.5);
+      return KeyEventResult.handled;
+    } else if (event.logicalKey == LogicalKeyboardKey.keyX) {
+      _adjustSubtitleDelay(0.5);
+      return KeyEventResult.handled;
     }
 
     return KeyEventResult.ignored;
+  }
+
+  void _showHud(String message, IconData icon) {
+    if (!mounted) return;
+    setState(() {
+      _hudToastMessage = message;
+      _hudToastIcon = icon;
+    });
+    _hudToastTimer?.cancel();
+    _hudToastTimer = Timer(const Duration(milliseconds: 1400), () {
+      if (mounted) {
+        setState(() {
+          _hudToastMessage = null;
+          _hudToastIcon = null;
+        });
+      }
+    });
+  }
+
+  void _stepPlaybackRate(double delta) {
+    const rates = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+    int currentIndex = rates.indexWhere(
+      (r) => (r - _playbackSpeed).abs() < 0.05,
+    );
+    if (currentIndex == -1) currentIndex = 2;
+
+    int nextIndex = (currentIndex + (delta > 0 ? 1 : -1)).clamp(
+      0,
+      rates.length - 1,
+    );
+    final newRate = rates[nextIndex];
+    setState(() => _playbackSpeed = newRate);
+    _player.setRate(newRate);
+    _showHud('سرعت پخش: ${newRate}x', Icons.speed_rounded);
+    _onUserInteraction();
+  }
+
+  void _toggleSubtitleVisibility() {
+    final currentSub = _player.state.track.subtitle;
+    if (currentSub == SubtitleTrack.no()) {
+      final available = _player.state.tracks.subtitle
+          .where((t) => t != SubtitleTrack.no())
+          .toList();
+      if (available.isNotEmpty) {
+        _player.setSubtitleTrack(available.first);
+        _showHud('زیرنویس: فعال', Icons.subtitles_rounded);
+      } else {
+        _showHud('هیچ زیرنویسی یافت نشد', Icons.subtitles_off_rounded);
+      }
+    } else {
+      _player.setSubtitleTrack(SubtitleTrack.no());
+      _showHud('زیرنویس: خاموش', Icons.subtitles_off_rounded);
+    }
+    _onUserInteraction();
+  }
+
+  void _adjustSubtitleDelay(double delta) {
+    _subtitleDelaySeconds = double.parse(
+      (_subtitleDelaySeconds + delta).toStringAsFixed(1),
+    );
+    _applySubtitleDelay(_subtitleDelaySeconds);
+    _showHud(
+      'تأخیر زیرنویس: ${_subtitleDelaySeconds >= 0 ? '+' : ''}${_subtitleDelaySeconds.toStringAsFixed(1)}s',
+      Icons.sync_rounded,
+    );
+    _onUserInteraction();
+  }
+
+  void _setSleepTimer(int? minutes, {bool atEpisodeEnd = false}) {
+    _sleepTimer?.cancel();
+    _sleepTicker?.cancel();
+    _sleepTimer = null;
+    _sleepTicker = null;
+
+    if (atEpisodeEnd) {
+      setState(() {
+        _sleepAtEpisodeEnd = true;
+        _sleepTimerRemainingMinutes = null;
+      });
+      _showHud('تایمر خواب: پایان این قسمت', Icons.bedtime_rounded);
+      return;
+    }
+
+    setState(() {
+      _sleepAtEpisodeEnd = false;
+      _sleepTimerRemainingMinutes = minutes;
+    });
+
+    if (minutes == null || minutes <= 0) {
+      _showHud('تایمر خواب غیرفعال شد', Icons.timer_off_rounded);
+      return;
+    }
+
+    _showHud('تایمر خواب: $minutes دقیقه', Icons.bedtime_rounded);
+
+    _sleepTimer = Timer(Duration(minutes: minutes), () {
+      if (mounted && !_isDisposed) {
+        _player.pause();
+        setState(() {
+          _sleepTimerRemainingMinutes = null;
+          _showControls = true;
+        });
+        _showHud('تایمر خواب: پخش متوقف شد', Icons.bedtime_rounded);
+      }
+    });
+
+    _sleepTicker = Timer.periodic(const Duration(minutes: 1), (timer) {
+      if (mounted && !_isDisposed && _sleepTimerRemainingMinutes != null) {
+        setState(() {
+          if (_sleepTimerRemainingMinutes! > 1) {
+            _sleepTimerRemainingMinutes = _sleepTimerRemainingMinutes! - 1;
+          } else {
+            timer.cancel();
+          }
+        });
+      } else {
+        timer.cancel();
+      }
+    });
+  }
+
+  void _showSleepTimerDialog() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF141620),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final isTimerActive =
+                _sleepTimerRemainingMinutes != null || _sleepAtEpisodeEnd;
+
+            return Directionality(
+              textDirection: TextDirection.rtl,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.bedtime_rounded,
+                              color: AppColors.brandRed,
+                              size: 22,
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              'تایمر خواب (Sleep Timer)',
+                              style: GoogleFonts.vazirmatn(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        IconButton(
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Colors.white70,
+                          ),
+                          onPressed: () => Navigator.pop(ctx),
+                        ),
+                      ],
+                    ),
+                    const Divider(color: Colors.white12, height: 20),
+                    Text(
+                      'با پایان زمان تعیین‌شده، پخش ویدیو خودکار متوقف می‌شود:',
+                      style: GoogleFonts.vazirmatn(
+                        color: AppColors.textMuted,
+                        fontSize: 13,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: [
+                        if (isTimerActive)
+                          _buildSleepChip(
+                            label: 'غیرفعال کردن تایمر',
+                            icon: Icons.timer_off_rounded,
+                            isSelected: false,
+                            isCancel: true,
+                            onTap: () {
+                              _setSleepTimer(null);
+                              Navigator.pop(ctx);
+                            },
+                          ),
+                        _buildSleepChip(
+                          label: '۱۵ دقیقه',
+                          isSelected: _sleepTimerRemainingMinutes == 15,
+                          onTap: () {
+                            _setSleepTimer(15);
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                        _buildSleepChip(
+                          label: '۳۰ دقیقه',
+                          isSelected: _sleepTimerRemainingMinutes == 30,
+                          onTap: () {
+                            _setSleepTimer(30);
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                        _buildSleepChip(
+                          label: '۴۵ دقیقه',
+                          isSelected: _sleepTimerRemainingMinutes == 45,
+                          onTap: () {
+                            _setSleepTimer(45);
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                        _buildSleepChip(
+                          label: '۶۰ دقیقه',
+                          isSelected: _sleepTimerRemainingMinutes == 60,
+                          onTap: () {
+                            _setSleepTimer(60);
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                        _buildSleepChip(
+                          label: 'اتمام این قسمت',
+                          icon: Icons.flag_rounded,
+                          isSelected: _sleepAtEpisodeEnd,
+                          onTap: () {
+                            _setSleepTimer(null, atEpisodeEnd: true);
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildSleepChip({
+    required String label,
+    required bool isSelected,
+    required VoidCallback onTap,
+    IconData? icon,
+    bool isCancel = false,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? AppColors.brandRed
+              : isCancel
+              ? Colors.redAccent.withValues(alpha: 0.15)
+              : AppColors.surfaceCard,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: isSelected
+                ? AppColors.brandRed
+                : isCancel
+                ? Colors.redAccent.withValues(alpha: 0.5)
+                : AppColors.glassBorder,
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(
+                icon,
+                size: 16,
+                color: isSelected
+                    ? Colors.white
+                    : isCancel
+                    ? Colors.redAccent
+                    : Colors.white70,
+              ),
+              const SizedBox(width: 6),
+            ],
+            Text(
+              label,
+              style: GoogleFonts.vazirmatn(
+                color: isSelected
+                    ? Colors.white
+                    : isCancel
+                    ? Colors.redAccent
+                    : Colors.white,
+                fontSize: 13,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   String _formatDuration(Duration d) {
@@ -724,6 +1069,50 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                             style: GoogleFonts.vazirmatn(
                               color: Colors.white,
                               fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                // HUD Message Overlay
+                if (_hudToastMessage != null)
+                  Align(
+                    alignment: const Alignment(0.0, -0.65),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.85),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: AppColors.brandRed.withValues(alpha: 0.7),
+                          width: 1.2,
+                        ),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black54, blurRadius: 16),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (_hudToastIcon != null) ...[
+                            Icon(
+                              _hudToastIcon,
+                              color: AppColors.brandRed,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                          Text(
+                            _hudToastMessage!,
+                            style: GoogleFonts.vazirmatn(
+                              color: Colors.white,
+                              fontSize: 13,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
@@ -1177,6 +1566,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                             tooltip: 'زیرنویس و صدا',
                                             onPressed:
                                                 _showTrackSelectionDialog,
+                                          ),
+
+                                          // Sleep Timer
+                                          IconButton(
+                                            icon: Icon(
+                                              _sleepTimerRemainingMinutes !=
+                                                          null ||
+                                                      _sleepAtEpisodeEnd
+                                                  ? Icons.bedtime_rounded
+                                                  : Icons.bedtime_outlined,
+                                              color:
+                                                  _sleepTimerRemainingMinutes !=
+                                                          null ||
+                                                      _sleepAtEpisodeEnd
+                                                  ? AppColors.brandRed
+                                                  : Colors.white,
+                                              size: 20,
+                                            ),
+                                            tooltip:
+                                                _sleepTimerRemainingMinutes !=
+                                                    null
+                                                ? 'تایمر خواب: $_sleepTimerRemainingMinutes دقیقه'
+                                                : _sleepAtEpisodeEnd
+                                                ? 'تایمر خواب: پایان این قسمت'
+                                                : 'تایمر خواب (Sleep Timer)',
+                                            onPressed: _showSleepTimerDialog,
                                           ),
 
                                           // PiP
